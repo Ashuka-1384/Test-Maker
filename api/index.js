@@ -97,7 +97,27 @@ function validateTestPayload(payload) {
     explanation: typeof question.explanation === 'string' ? question.explanation.trim() : ''
   }));
 
-  return { value: { title, max_score: maxScore, pass_score: passScore, questions } };
+  // پیش‌فرض: شرکت چندباره مجاز است (سازگار با آزمون‌های قبلی)
+  const allowMultiple = payload.allow_multiple_attempts === undefined
+    ? true
+    : payload.allow_multiple_attempts === true || payload.allow_multiple_attempts === 'true';
+
+  return {
+    value: {
+      title,
+      max_score: maxScore,
+      pass_score: passScore,
+      questions,
+      allow_multiple_attempts: allowMultiple
+    }
+  };
+}
+
+const MIGRATION_MESSAGE =
+  'ستون allow_multiple_attempts در دیتابیس وجود ندارد. فایل schema.sql را یک‌بار در SQL Editor سوپابیس اجرا کنید.';
+
+function isMissingAttemptColumn(error) {
+  return Boolean(error && /allow_multiple_attempts/i.test(error.message || ''));
 }
 
 // اطمینان از وجود ادمین اصلی پیش‌فرض
@@ -132,14 +152,16 @@ app.get('/api/health', asyncRoute(async (_req, res) => {
   if (!checkDb(res)) return;
   const checks = await Promise.all([
     supabase.from('users').select('id').limit(1),
-    supabase.from('tests').select('id, is_archived').limit(1),
+    supabase.from('tests').select('id, is_archived, allow_multiple_attempts').limit(1),
     supabase.from('attempts').select('id, test_id').limit(1)
   ]);
   const failed = checks.find((result) => result.error);
   if (failed) {
     return res.status(500).json({
       ok: false,
-      error: `بررسی دیتابیس ناموفق بود: ${failed.error.message}. فایل schema.sql نسخه جدید را در Supabase اجرا کنید.`
+      error: isMissingAttemptColumn(failed.error)
+        ? MIGRATION_MESSAGE
+        : `بررسی دیتابیس ناموفق بود: ${failed.error.message}. فایل schema.sql نسخه جدید را در Supabase اجرا کنید.`
     });
   }
   return res.json({ ok: true, message: 'اتصال جداول اصلی Supabase برقرار است.' });
@@ -242,12 +264,22 @@ app.post('/api/tests', asyncRoute(async (req, res) => {
     return res.status(400).json({ error: 'اطلاعات طراح آزمون معتبر نیست.' });
   }
 
-  const { data, error } = await supabase.from('tests').insert([{
+  const row = {
     ...validated.value,
     creator_id: creatorId,
     creator_username: creatorUsername,
     is_archived: false
-  }]).select('*').single();
+  };
+  let { data, error } = await supabase.from('tests').insert([row]).select('*').single();
+
+  if (error && isMissingAttemptColumn(error)) {
+    // دیتابیس هنوز مهاجرت نشده: آزمون چندباره همچنان ساخته می‌شود، حالت «یک‌بار» نیازمند مهاجرت است.
+    if (row.allow_multiple_attempts === false) {
+      return res.status(409).json({ error: MIGRATION_MESSAGE });
+    }
+    const { allow_multiple_attempts: _ignored, ...legacyRow } = row;
+    ({ data, error } = await supabase.from('tests').insert([legacyRow]).select('*').single());
+  }
   if (error) return res.status(500).json({ error: error.message });
   return res.status(201).json({ test: data });
 }));
@@ -269,9 +301,51 @@ app.put('/api/tests/:id', asyncRoute(async (req, res) => {
     return res.status(409).json({ error: 'این آزمون سابقه شرکت‌کننده دارد؛ برای حفظ صحت کارنامه‌ها، ویرایش آن غیرفعال است. یک آزمون جدید از روی آن بسازید.' });
   }
 
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('tests').update(validated.value).eq('id', req.params.id).select('*').single();
+  if (error && isMissingAttemptColumn(error)) {
+    if (validated.value.allow_multiple_attempts === false) {
+      return res.status(409).json({ error: MIGRATION_MESSAGE });
+    }
+    const { allow_multiple_attempts: _ignored, ...legacyValue } = validated.value;
+    ({ data, error } = await supabase
+      .from('tests').update(legacyValue).eq('id', req.params.id).select('*').single());
+  }
   if (error) return res.status(500).json({ error: error.message });
+  return res.json({ test: data });
+}));
+
+// تغییر سیاست تعداد دفعات شرکت؛ برخلاف ویرایش کامل، حتی پس از ثبت کارنامه هم مجاز است
+// چون روی معنای کارنامه‌های قبلی اثری ندارد.
+app.patch('/api/tests/:id/attempt-policy', asyncRoute(async (req, res) => {
+  if (!checkDb(res)) return;
+  const userId = Number(req.body.user_id);
+  if (typeof req.body.allow_multiple_attempts !== 'boolean') {
+    return res.status(400).json({ error: 'مقدار سیاست تعداد دفعات شرکت معتبر نیست.' });
+  }
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ error: 'اطلاعات کاربر معتبر نیست.' });
+  }
+
+  const [{ data: actor, error: actorError }, { data: test, error: testError }] = await Promise.all([
+    supabase.from('users').select('id, role').eq('id', userId).maybeSingle(),
+    supabase.from('tests').select('id, creator_id, is_archived').eq('id', req.params.id).maybeSingle()
+  ]);
+  if (actorError) return res.status(500).json({ error: actorError.message });
+  if (testError) return res.status(500).json({ error: testError.message });
+  if (!actor) return res.status(401).json({ error: 'کاربر یافت نشد.' });
+  if (!test || test.is_archived) return res.status(404).json({ error: 'آزمون فعال پیدا نشد.' });
+  if (actor.role !== 'super_admin' && test.creator_id !== actor.id) {
+    return res.status(403).json({ error: 'فقط طراح آزمون یا ادمین اصلی می‌تواند این تنظیم را تغییر دهد.' });
+  }
+
+  const { data, error } = await supabase
+    .from('tests').update({ allow_multiple_attempts: req.body.allow_multiple_attempts })
+    .eq('id', req.params.id).select('*').single();
+  if (error) {
+    return res.status(isMissingAttemptColumn(error) ? 409 : 500)
+      .json({ error: isMissingAttemptColumn(error) ? MIGRATION_MESSAGE : error.message });
+  }
   return res.json({ test: data });
 }));
 
@@ -299,6 +373,21 @@ app.post('/api/attempts', asyncRoute(async (req, res) => {
     .from('tests').select('*').eq('id', testId).eq('is_archived', false).maybeSingle();
   if (testError) return res.status(500).json({ error: testError.message });
   if (!test) return res.status(404).json({ error: 'آزمون پیدا نشد یا دیگر فعال نیست.' });
+
+  // اعمال سیاست «فقط یک‌بار شرکت» در سمت سرور (نه فقط در رابط کاربری)
+  const singleAttemptOnly = test.allow_multiple_attempts === false;
+  if (singleAttemptOnly) {
+    const { count: previousCount, error: previousError } = await supabase
+      .from('attempts').select('id', { count: 'exact', head: true })
+      .eq('test_id', test.id).eq('user_id', userId);
+    if (previousError) return res.status(500).json({ error: previousError.message });
+    if ((previousCount || 0) > 0) {
+      return res.status(409).json({
+        code: 'ATTEMPT_LIMIT_REACHED',
+        error: 'این آزمون فقط یک‌بار قابل شرکت است و شما قبلاً در آن شرکت کرده‌اید.'
+      });
+    }
+  }
 
   const questions = Array.isArray(test.questions) ? test.questions : [];
   const totalWeight = questions.reduce((sum, question) => {
@@ -372,6 +461,21 @@ app.post('/api/attempts', asyncRoute(async (req, res) => {
   }]).select('*').single();
 
   if (error) return res.status(500).json({ error: error.message });
+
+  // محافظت در برابر ارسال هم‌زمان دو درخواست: اگر بیش از یک کارنامه ثبت شد، کارنامه جدیدتر برگردانده می‌شود.
+  if (singleAttemptOnly) {
+    const { data: duplicates } = await supabase
+      .from('attempts').select('id').eq('test_id', test.id).eq('user_id', userId)
+      .order('id', { ascending: true });
+    if (duplicates && duplicates.length > 1 && duplicates[0].id !== attempt.id) {
+      await supabase.from('attempts').delete().eq('id', attempt.id);
+      return res.status(409).json({
+        code: 'ATTEMPT_LIMIT_REACHED',
+        error: 'این آزمون فقط یک‌بار قابل شرکت است و شما قبلاً در آن شرکت کرده‌اید.'
+      });
+    }
+  }
+
   return res.status(201).json({
     attempt,
     summary: { correctCount, totalQuestions: questions.length, earnedWeight, totalWeight }

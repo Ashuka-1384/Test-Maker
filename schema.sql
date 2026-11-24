@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS tests (
 ALTER TABLE tests
   ADD COLUMN IF NOT EXISTS is_archived BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- قابلیت جدید: تعیین اینکه هر کاربر فقط یک‌بار یا چندبار می‌تواند در آزمون شرکت کند.
+-- TRUE = شرکت چندباره مجاز (پیش‌فرض، سازگار با آزمون‌های قبلی) | FALSE = فقط یک‌بار
+ALTER TABLE tests
+  ADD COLUMN IF NOT EXISTS allow_multiple_attempts BOOLEAN NOT NULL DEFAULT TRUE;
+
 CREATE TABLE IF NOT EXISTS attempts (
   id SERIAL PRIMARY KEY,
   test_id INTEGER REFERENCES tests(id) ON DELETE SET NULL,
@@ -56,5 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_attempts_test_id
   ON attempts (test_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_user_id
   ON attempts (user_id);
+CREATE INDEX IF NOT EXISTS idx_attempts_test_user
+  ON attempts (test_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_attempts_created_at
   ON attempts (created_at DESC);
