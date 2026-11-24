@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import PWAInstallPrompt from './PWAInstallPrompt.jsx';
 import {
   BookOpen,
   PlusCircle,
@@ -12,7 +13,8 @@ import {
   Trash2,
   ShieldCheck,
   UserCheck,
-  ClipboardList
+  ClipboardList,
+  Download
 } from 'lucide-react';
 
 const ROLE_LABELS = {
@@ -21,10 +23,24 @@ const ROLE_LABELS = {
   user: 'کاربر'
 };
 
+function isQuestionAnswered(question, answer) {
+  if ((question?.type || 'single_choice') === 'multiple_choice') {
+    return Array.isArray(answer) && answer.length >= 2;
+  }
+  const selected = Number(answer);
+  return answer !== null && answer !== undefined && answer !== '' &&
+    Number.isInteger(selected) && selected >= 0 && selected < (question?.options?.length || 4);
+}
+
 export default function App() {
   const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem('tm_user');
-    return saved ? JSON.parse(saved) : null;
+    try {
+      const saved = localStorage.getItem('tm_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      localStorage.removeItem('tm_user');
+      return null;
+    }
   });
 
   const [dbStatus, setDbStatus] = useState({ checked: false, ok: true, message: '' });
@@ -40,6 +56,10 @@ export default function App() {
   const [tests, setTests] = useState([]);
   const [attempts, setAttempts] = useState([]);
   const [allUsers, setAllUsers] = useState([]);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [editingTest, setEditingTest] = useState(null);
+  const [testSearch, setTestSearch] = useState('');
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
 
   const [takingTest, setTakingTest] = useState(null);
   const [userAnswers, setUserAnswers] = useState({});
@@ -72,29 +92,55 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (user) {
-      fetchAllData();
-    }
+    if (user) fetchAllData();
   }, [user]);
 
+  useEffect(() => {
+    const updateNetwork = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', updateNetwork);
+    window.addEventListener('offline', updateNetwork);
+    return () => {
+      window.removeEventListener('online', updateNetwork);
+      window.removeEventListener('offline', updateNetwork);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!takingTest || !user) return;
+    const draftKey = `tm_answers_${user.id}_${takingTest.id}`;
+    try {
+      localStorage.setItem(draftKey, JSON.stringify(userAnswers));
+    } catch (error) {
+      console.warn('Could not save answer draft:', error);
+    }
+  }, [userAnswers, takingTest, user]);
+
   async function fetchAllData() {
+    setDataLoading(true);
     try {
       const [testsRes, attemptsRes] = await Promise.all([
-        fetch('/api/tests'),
+        fetch('/api/tests?include_archived=true'),
         fetch('/api/attempts')
       ]);
-      const testsData = await testsRes.json();
-      const attemptsData = await attemptsRes.json();
-      if (testsData.tests) setTests(testsData.tests);
-      if (attemptsData.attempts) setAttempts(attemptsData.attempts);
+      const [testsData, attemptsData] = await Promise.all([
+        testsRes.json(), attemptsRes.json()
+      ]);
+      if (!testsRes.ok) throw new Error(testsData.error || 'دریافت آزمون‌ها ناموفق بود.');
+      if (!attemptsRes.ok) throw new Error(attemptsData.error || 'دریافت نتایج ناموفق بود.');
+      setTests(Array.isArray(testsData.tests) ? testsData.tests : []);
+      setAttempts(Array.isArray(attemptsData.attempts) ? attemptsData.attempts : []);
 
-      if (user.role === 'super_admin') {
+      if (user?.role === 'super_admin') {
         const usersRes = await fetch('/api/users');
         const usersData = await usersRes.json();
-        if (usersData.users) setAllUsers(usersData.users);
+        if (!usersRes.ok) throw new Error(usersData.error || 'دریافت کاربران ناموفق بود.');
+        setAllUsers(Array.isArray(usersData.users) ? usersData.users : []);
       }
     } catch (err) {
       console.error('Error loading data:', err);
+      alert(err.message || 'بارگذاری اطلاعات با مشکل مواجه شد.');
+    } finally {
+      setDataLoading(false);
     }
   }
 
@@ -156,24 +202,54 @@ export default function App() {
   }
 
   async function handleDeleteTest(testId) {
-    if (!confirm('آیا از حذف این آزمون مطمئن هستید؟')) return;
+    if (!confirm('این آزمون آرشیو می‌شود و از فهرست آزمون‌های فعال کنار می‌رود؛ کارنامه‌های قبلی حفظ می‌شوند. ادامه می‌دهید؟')) return;
     try {
       const res = await fetch(`/api/tests/${testId}`, { method: 'DELETE' });
+      const data = await res.json();
       if (res.ok) {
-        setTests((prev) => prev.filter((t) => t.id !== testId));
+        setTests((prev) => prev.map((test) => test.id === testId ? { ...test, is_archived: true } : test));
+      } else {
+        alert(data.error || 'آرشیو آزمون انجام نشد.');
       }
     } catch (err) {
-      alert('خطا در حذف آزمون');
+      alert('ارتباط با سرور برای آرشیو آزمون برقرار نشد.');
     }
   }
 
   function startTest(test) {
+    const draftKey = `tm_answers_${user.id}_${test.id}`;
+    let savedAnswers = {};
+    try {
+      savedAnswers = JSON.parse(localStorage.getItem(draftKey) || '{}');
+    } catch {
+      localStorage.removeItem(draftKey);
+    }
     setTakingTest(test);
-    setUserAnswers({});
+    setUserAnswers(savedAnswers && typeof savedAnswers === 'object' ? savedAnswers : {});
+  }
+
+  function startEditingTest(test) {
+    setEditingTest(test);
+    setActiveTab('create_test');
+  }
+
+  function selectQuestionOption(questionIndex, optionIndex, isMultiple) {
+    setUserAnswers((previous) => {
+      if (!isMultiple) return { ...previous, [questionIndex]: optionIndex };
+      const current = Array.isArray(previous[questionIndex]) ? previous[questionIndex] : [];
+      const next = current.includes(optionIndex)
+        ? current.filter((value) => value !== optionIndex)
+        : [...current, optionIndex].sort((a, b) => a - b);
+      return { ...previous, [questionIndex]: next };
+    });
   }
 
   async function submitTestAnswers() {
-    if (!takingTest) return;
+    if (!takingTest || submittingTest) return;
+    const unanswered = takingTest.questions.filter((question, index) =>
+      !isQuestionAnswered(question, userAnswers[index])
+    ).length;
+    if (unanswered > 0 && !confirm(`${unanswered} سؤال بدون پاسخ باقی مانده است. آزمون با همین وضعیت ثبت شود؟`)) return;
     setSubmittingTest(true);
     try {
       const res = await fetch('/api/attempts', {
@@ -189,7 +265,9 @@ export default function App() {
       const data = await res.json();
       if (res.ok && data.attempt) {
         setAttempts((prev) => [data.attempt, ...prev]);
+        localStorage.removeItem(`tm_answers_${user.id}_${takingTest.id}`);
         setTakingTest(null);
+        setUserAnswers({});
         setSelectedAttempt(data.attempt);
       } else {
         alert(data.error || 'خطا در ثبت آزمون');
@@ -225,6 +303,7 @@ export default function App() {
             <p style={{ color: 'var(--muted)', fontSize: '0.9rem', marginTop: 4 }}>
               سامانه آنلاین طراحی و برگزاری آزمون
             </p>
+            <div style={{ marginTop: 12 }}><PWAInstallPrompt /></div>
           </div>
 
           {dbStatus.checked && !dbStatus.ok && (
@@ -296,7 +375,21 @@ export default function App() {
   }
 
   const canCreateTests = user.role === 'super_admin' || user.role === 'designer';
+  const activeTests = tests.filter((test) => !test.is_archived);
   const myAttempts = attempts.filter((a) => a.user_id === user.id);
+  const normalizedTestSearch = testSearch.trim().toLocaleLowerCase('fa');
+  const visibleTests = activeTests.filter((test) =>
+    !normalizedTestSearch || `${test.title} ${test.creator_username}`.toLocaleLowerCase('fa').includes(normalizedTestSearch)
+  );
+  const myAverageScore = myAttempts.length
+    ? `${(myAttempts.reduce((sum, attempt) => sum + (Number(attempt.max_score) > 0 ? (Number(attempt.score) / Number(attempt.max_score)) * 100 : 0), 0) / myAttempts.length).toFixed(1)}٪`
+    : '—';
+  const myPassRate = myAttempts.length
+    ? `${Math.round((myAttempts.filter((attempt) => attempt.passed).length / myAttempts.length) * 100)}٪`
+    : '—';
+  const myBestScore = myAttempts.length
+    ? `${Math.max(...myAttempts.map((attempt) => Number(attempt.max_score) > 0 ? (Number(attempt.score) / Number(attempt.max_score)) * 100 : 0)).toFixed(1)}٪`
+    : '—';
 
   const designerTestIds = new Set(
     tests.filter((t) => t.creator_id === user.id).map((t) => t.id)
@@ -315,6 +408,7 @@ export default function App() {
         </div>
 
         <div className="user-badge">
+          <PWAInstallPrompt compact />
           <span style={{ fontWeight: 700 }}>{user.username}</span>
           <span className={`role-pill role-${user.role}`}>{ROLE_LABELS[user.role]}</span>
           <button className="btn btn-outline btn-sm" onClick={handleLogout}>
@@ -325,6 +419,7 @@ export default function App() {
       </header>
 
       <main className="container">
+        {!isOnline && <div className="alert alert-warning" role="status">اتصال اینترنت قطع است. نسخه نصب‌شده باز می‌شود، اما دریافت آزمون‌ها و ثبت پاسخ‌ها تا زمان اتصال مجدد در دسترس نیست.</div>}
         {dbStatus.checked && !dbStatus.ok && (
           <div className="alert alert-error">
             <strong>خطای اتصال:</strong> {dbStatus.message}
@@ -346,47 +441,63 @@ export default function App() {
               <div>
                 <h2 style={{ fontSize: '1.3rem', fontWeight: 800 }}>{takingTest.title}</h2>
                 <p style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-                  سقف نمره: {takingTest.max_score} | حداقل نمره قبولی: {takingTest.pass_score} |
-                  تعداد سوالات: {takingTest.questions.length}
+                  سقف نمره: {takingTest.max_score} | حداقل قبولی: {takingTest.pass_score} | تعداد سؤالات: {takingTest.questions.length}
                 </p>
+                <div className="exam-progress" aria-live="polite">
+                  <span>پاسخ داده‌شده: {takingTest.questions.filter((question, index) => isQuestionAnswered(question, userAnswers[index])).length} از {takingTest.questions.length}</span>
+                  <div className="progress-track"><span style={{ width: `${(takingTest.questions.filter((question, index) => isQuestionAnswered(question, userAnswers[index])).length / takingTest.questions.length) * 100}%` }} /></div>
+                  <small>پاسخ‌ها روی همین دستگاه به‌طور خودکار ذخیره می‌شوند.</small>
+                </div>
               </div>
               <button className="btn btn-outline" onClick={() => setTakingTest(null)}>
                 انصراف و بازگشت
               </button>
             </div>
 
-            {takingTest.questions.map((q, qIdx) => (
-              <div key={qIdx} className="question-box">
-                <div style={{ fontWeight: 700, marginBottom: 10 }}>
-                  سوال {qIdx + 1}: {q.text}
+            {takingTest.questions.map((q, qIdx) => {
+              const isMultiple = (q.type || 'single_choice') === 'multiple_choice';
+              const selectedValues = Array.isArray(userAnswers[qIdx]) ? userAnswers[qIdx] : [];
+              const typeLabel = isMultiple ? 'چندپاسخی' : q.type === 'true_false' ? 'درست / نادرست' : 'تک‌پاسخی';
+              return (
+                <div key={qIdx} className="question-box">
+                  <div className="question-prompt-row">
+                    <div style={{ fontWeight: 700 }}>سؤال {qIdx + 1}: {q.text}</div>
+                    <span className="question-type-badge">{typeLabel}</span>
+                  </div>
+                  {isMultiple && <p className="muted-copy">می‌توانید بیش از یک گزینه را انتخاب کنید.</p>}
+                  {q.options.map((opt, optIdx) => {
+                    const isSelected = isMultiple
+                      ? selectedValues.includes(optIdx)
+                      : userAnswers[qIdx] === optIdx;
+                    return (
+                      <div
+                        key={optIdx}
+                        className={`option-choice ${isSelected ? 'selected' : ''}`}
+                        role={isMultiple ? 'checkbox' : 'radio'}
+                        aria-checked={isSelected}
+                        tabIndex={0}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter' || event.key === ' ') {
+                            event.preventDefault();
+                            selectQuestionOption(qIdx, optIdx, isMultiple);
+                          }
+                        }}
+                        onClick={() => selectQuestionOption(qIdx, optIdx, isMultiple)}
+                      >
+                        <input
+                          type={isMultiple ? 'checkbox' : 'radio'}
+                          name={`q_${qIdx}`}
+                          checked={isSelected}
+                          aria-label={opt}
+                          onChange={() => {}}
+                        />
+                        <span>{optIdx + 1}) {opt}</span>
+                      </div>
+                    );
+                  })}
                 </div>
-                {q.options.map((opt, optIdx) => {
-                  const isSelected = userAnswers[qIdx] === optIdx;
-                  return (
-                    <div
-                      key={optIdx}
-                      className={`option-choice ${isSelected ? 'selected' : ''}`}
-                      onClick={() =>
-                        setUserAnswers((prev) => ({
-                          ...prev,
-                          [qIdx]: optIdx
-                        }))
-                      }
-                    >
-                      <input
-                        type="radio"
-                        name={`q_${qIdx}`}
-                        checked={isSelected}
-                        onChange={() => {}}
-                      />
-                      <span>
-                        {optIdx + 1}) {opt}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
+              );
+            })}
 
             <button
               className="btn btn-success btn-block"
@@ -400,13 +511,21 @@ export default function App() {
           </div>
         ) : (
           <>
+            {dataLoading && <div className="alert alert-info" role="status">در حال دریافت اطلاعات و نتایج...</div>}
+            <div className="metrics-grid">
+              <div className="metric-card"><span>آزمون‌های فعال</span><strong>{activeTests.length}</strong></div>
+              <div className="metric-card"><span>دفعات شرکت شما</span><strong>{myAttempts.length}</strong></div>
+              <div className="metric-card"><span>میانگین درصد نمرات</span><strong>{myAverageScore}</strong></div>
+              <div className="metric-card"><span>نرخ قبولی شما</span><strong>{myPassRate}</strong></div>
+              <div className="metric-card"><span>بهترین درصد شما</span><strong>{myBestScore}</strong></div>
+            </div>
             <div className="tabs">
               <button
                 className={`tab-btn ${activeTab === 'tests' ? 'active' : ''}`}
                 onClick={() => setActiveTab('tests')}
               >
                 <ClipboardList size={18} />
-                لیست آزمون‌ها ({tests.length})
+                آزمون‌های فعال ({activeTests.length})
               </button>
 
               <button
@@ -420,7 +539,7 @@ export default function App() {
               {canCreateTests && (
                 <button
                   className={`tab-btn ${activeTab === 'create_test' ? 'active' : ''}`}
-                  onClick={() => setActiveTab('create_test')}
+                  onClick={() => { setEditingTest(null); setActiveTab('create_test'); }}
                 >
                   <PlusCircle size={18} />
                   ساخت آزمون جدید
@@ -452,13 +571,19 @@ export default function App() {
 
             {activeTab === 'tests' && (
               <div>
-                {tests.length === 0 ? (
+                <div className="test-search-wrap">
+                  <input type="search" value={testSearch} onChange={(event) => setTestSearch(event.target.value)}
+                    placeholder="جست‌وجوی آزمون بر اساس عنوان یا نام طراح..." aria-label="جست‌وجوی آزمون‌ها" />
+                </div>
+                {activeTests.length === 0 ? (
                   <div className="card" style={{ textAlign: 'center', color: 'var(--muted)' }}>
-                    هنوز هیچ آزمونی ساخته نشده است.
+                    هنوز هیچ آزمون فعالی وجود ندارد.
                   </div>
+                ) : visibleTests.length === 0 ? (
+                  <div className="card empty-state">آزمونی با این عبارت پیدا نشد.</div>
                 ) : (
                   <div className="grid-2">
-                    {tests.map((t) => {
+                    {visibleTests.map((t) => {
                       const myCount = myAttempts.filter((a) => a.test_id === t.id).length;
                       return (
                         <div key={t.id} className="card" style={{ marginBottom: 0 }}>
@@ -472,13 +597,17 @@ export default function App() {
                           >
                             <h3 style={{ fontSize: '1.15rem', fontWeight: 800 }}>{t.title}</h3>
                             {(user.role === 'super_admin' || t.creator_id === user.id) && (
-                              <button
-                                className="btn btn-danger btn-sm"
-                                title="حذف آزمون"
-                                onClick={() => handleDeleteTest(t.id)}
-                              >
-                                <Trash2 size={15} />
-                              </button>
+                              <div className="test-card-actions">
+                                {attempts.every((attempt) => attempt.test_id !== t.id) && (
+                                  <button className="btn btn-outline btn-sm" title="ویرایش آزمون" onClick={() => startEditingTest(t)}>
+                                    ویرایش
+                                  </button>
+                                )}
+                                <button className="btn btn-danger btn-sm" title="آرشیو آزمون" onClick={() => handleDeleteTest(t.id)}>
+                                  <Trash2 size={15} />
+                                  <span>آرشیو</span>
+                                </button>
+                              </div>
                             )}
                           </div>
 
@@ -579,11 +708,19 @@ export default function App() {
 
             {activeTab === 'create_test' && canCreateTests && (
               <TestCreatorForm
+                key={editingTest?.id || 'new-test'}
                 user={user}
-                onCreated={(newTest) => {
-                  setTests((prev) => [newTest, ...prev]);
+                initialTest={editingTest}
+                onCreated={(savedTest, wasEdit) => {
+                  if (wasEdit) {
+                    setTests((prev) => prev.map((test) => test.id === savedTest.id ? savedTest : test));
+                  } else {
+                    setTests((prev) => [savedTest, ...prev]);
+                  }
+                  setEditingTest(null);
                   setActiveTab('tests');
                 }}
+                onCancel={() => { setEditingTest(null); setActiveTab('tests'); }}
               />
             )}
 
@@ -720,12 +857,16 @@ export default function App() {
                     style={{
                       display: 'flex',
                       justifyContent: 'space-between',
-                      alignItems: 'center',
+                      alignItems: 'flex-start',
+                      gap: 10,
                       marginBottom: 8
                     }}
                   >
                     <span style={{ fontWeight: 700 }}>
-                      سوال {idx + 1}: {item.questionText}
+                      سؤال {idx + 1}: {item.questionText}
+                    </span>
+                    <span className="question-type-badge">
+                      {item.type === 'multiple_choice' ? 'چندپاسخی' : item.type === 'true_false' ? 'درست / نادرست' : 'تک‌پاسخی'} · ضریب {item.weight ?? 1}
                     </span>
                     {item.isCorrect ? (
                       <span
@@ -757,33 +898,35 @@ export default function App() {
                   </div>
 
                   {item.options.map((opt, oIdx) => {
+                    const isMultiple = item.type === 'multiple_choice';
+                    const isCorrectOption = isMultiple
+                      ? (item.correctIndices || []).includes(oIdx)
+                      : oIdx === item.correctIndex;
+                    const isSelectedOption = isMultiple
+                      ? (item.selectedIndices || []).includes(oIdx)
+                      : oIdx === item.selectedIndex;
                     let cls = 'option-choice';
-                    if (oIdx === item.correctIndex) cls += ' correct';
-                    else if (oIdx === item.selectedIndex && !item.isCorrect) cls += ' wrong';
+                    if (isCorrectOption) cls += ' correct';
+                    else if (isSelectedOption) cls += ' wrong';
 
                     return (
                       <div key={oIdx} className={cls} style={{ cursor: 'default' }}>
-                        <span>
-                          {oIdx + 1}) {opt}
-                        </span>
-                        {oIdx === item.correctIndex && (
-                          <strong style={{ marginRight: 'auto', fontSize: '0.82rem' }}>
-                            (گزینه صحیح)
-                          </strong>
-                        )}
-                        {oIdx === item.selectedIndex && oIdx !== item.correctIndex && (
-                          <strong style={{ marginRight: 'auto', fontSize: '0.82rem' }}>
-                            (انتخاب شما)
-                          </strong>
-                        )}
+                        <span>{oIdx + 1}) {opt}</span>
+                        {isCorrectOption && <strong className="option-result-tag">(پاسخ صحیح)</strong>}
+                        {isSelectedOption && !isCorrectOption && <strong className="option-result-tag">(انتخاب شما)</strong>}
                       </div>
                     );
                   })}
 
-                  {item.selectedIndex === -1 && (
+                  {(item.type === 'multiple_choice'
+                    ? !(item.selectedIndices || []).length
+                    : item.selectedIndex === -1) && (
                     <p style={{ color: 'var(--danger)', fontSize: '0.84rem', marginTop: 8 }}>
-                      * به این سوال پاسخی داده نشده است.
+                      * به این سؤال پاسخی داده نشده است.
                     </p>
+                  )}
+                  {item.explanation && (
+                    <div className="answer-explanation"><strong>توضیح پاسخ:</strong> {item.explanation}</div>
                   )}
                 </div>
               ))}
@@ -795,17 +938,28 @@ export default function App() {
   );
 }
 
-function TestCreatorForm({ user, onCreated }) {
-  const [title, setTitle] = useState('');
-  const [maxScore, setMaxScore] = useState(20);
-  const [passScore, setPassScore] = useState(10);
-  const [questions, setQuestions] = useState([
-    { text: '', options: ['', '', '', ''], correctIndex: 0 }
-  ]);
+function TestCreatorForm({ user, initialTest, onCreated, onCancel }) {
+  const [title, setTitle] = useState(initialTest?.title || '');
+  const [maxScore, setMaxScore] = useState(initialTest?.max_score || 20);
+  const [passScore, setPassScore] = useState(initialTest?.pass_score ?? 10);
+  const [questions, setQuestions] = useState(() => initialTest?.questions?.map((question) => ({
+    type: question.type || 'single_choice',
+    text: question.text || '',
+    options: Array.isArray(question.options) ? [...question.options] : ['', '', '', ''],
+    correctIndex: question.correctIndex === null || question.correctIndex === undefined || String(question.correctIndex).trim() === ''
+      ? null
+      : Number.isInteger(Number(question.correctIndex)) ? Number(question.correctIndex) : null,
+    correctIndices: Array.isArray(question.correctIndices) ? question.correctIndices.map(Number) : [],
+    weight: question.weight ?? 1,
+    explanation: question.explanation || ''
+  })) || [{ type: 'single_choice', text: '', options: ['', '', '', ''], correctIndex: null, correctIndices: [], weight: 1, explanation: '' }]);
   const [saving, setSaving] = useState(false);
 
   function addQuestion() {
-    setQuestions((prev) => [...prev, { text: '', options: ['', '', '', ''], correctIndex: 0 }]);
+    setQuestions((prev) => [...prev, {
+      type: 'single_choice', text: '', options: ['', '', '', ''], correctIndex: null,
+      correctIndices: [], weight: 1, explanation: ''
+    }]);
   }
 
   function removeQuestion(index) {
@@ -813,47 +967,78 @@ function TestCreatorForm({ user, onCreated }) {
     setQuestions((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function updateQuestionText(index, value) {
-    setQuestions((prev) => prev.map((q, i) => (i === index ? { ...q, text: value } : q)));
+  function updateQuestion(index, changes) {
+    setQuestions((prev) => prev.map((question, i) =>
+      i === index ? { ...question, ...changes } : question
+    ));
   }
 
-  function updateOption(qIndex, optIndex, value) {
-    setQuestions((prev) =>
-      prev.map((q, i) => {
-        if (i !== qIndex) return q;
-        const newOpts = [...q.options];
-        newOpts[optIndex] = value;
-        return { ...q, options: newOpts };
-      })
-    );
+  function updateQuestionType(index, type) {
+    setQuestions((prev) => prev.map((question, questionIndex) => {
+      if (questionIndex !== index) return question;
+      const options = type === 'true_false'
+        ? ['درست', 'نادرست']
+        : question.options.length === 4 ? question.options : ['', '', '', ''];
+      return { ...question, type, options, correctIndex: null, correctIndices: [] };
+    }));
   }
 
-  function updateCorrectOption(qIndex, correctIndex) {
-    setQuestions((prev) =>
-      prev.map((q, i) => (i === qIndex ? { ...q, correctIndex } : q))
-    );
+  function toggleCorrectIndex(questionIndex, optionIndex) {
+    setQuestions((prev) => prev.map((question, index) => {
+      if (index !== questionIndex) return question;
+      const current = Array.isArray(question.correctIndices) ? question.correctIndices : [];
+      const next = current.includes(optionIndex)
+        ? current.filter((value) => value !== optionIndex)
+        : [...current, optionIndex].sort((a, b) => a - b);
+      return { ...question, correctIndices: next };
+    }));
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault();
-    if (!title.trim()) return alert('نام آزمون را وارد کنید.');
-    if (Number(passScore) > Number(maxScore) || Number(passScore) < 0) {
-      return alert('نمره قبولی باید بین ۰ تا سقف نمره آزمون باشد.');
+  function updateOption(questionIndex, optionIndex, value) {
+    setQuestions((prev) => prev.map((question, i) => {
+      if (i !== questionIndex) return question;
+      const options = [...question.options];
+      options[optionIndex] = value;
+      return { ...question, options };
+    }));
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (!title.trim()) return alert('عنوان آزمون را وارد کنید.');
+    if (!Number.isFinite(Number(passScore)) || Number(passScore) < 0 || Number(passScore) > Number(maxScore)) {
+      return alert('نمره قبولی باید بین صفر و سقف نمره آزمون باشد.');
     }
 
-    for (let i = 0; i < questions.length; i++) {
-      if (!questions[i].text.trim()) {
-        return alert(`متن سوال شماره ${i + 1} را وارد کنید.`);
+    for (let index = 0; index < questions.length; index += 1) {
+      const question = questions[index];
+      if (!question.text.trim()) return alert(`متن سؤال شماره ${index + 1} را وارد کنید.`);
+      const questionType = question.type || 'single_choice';
+      const expectedOptions = questionType === 'true_false' ? 2 : 4;
+      if (question.options.length !== expectedOptions || question.options.some((option) => !option.trim())) {
+        return alert(questionType === 'true_false'
+          ? `دو گزینه سؤال درست/نادرست شماره ${index + 1} باید تکمیل شوند.`
+          : `هر چهار گزینه سؤال شماره ${index + 1} باید تکمیل شوند.`);
       }
-      if (questions[i].options.some((opt) => !opt.trim())) {
-        return alert(`تمام ۴ گزینه سوال شماره ${i + 1} باید پر شوند.`);
+      if (questionType === 'multiple_choice') {
+        if (!Array.isArray(question.correctIndices) || question.correctIndices.length < 2) {
+          return alert(`برای سؤال چندپاسخی شماره ${index + 1} حداقل دو پاسخ صحیح انتخاب کنید.`);
+        }
+      } else if (question.correctIndex === null || question.correctIndex === undefined || String(question.correctIndex).trim() === '' ||
+          !Array.from({ length: expectedOptions }, (_, optionIndex) => optionIndex).includes(Number(question.correctIndex))) {
+        return alert(`پاسخ صحیح سؤال شماره ${index + 1} را انتخاب کنید.`);
+      }
+      if (!Number.isFinite(Number(question.weight)) || Number(question.weight) <= 0 || Number(question.weight) > 100) {
+        return alert(`وزن سؤال شماره ${index + 1} باید بین ۰ تا ۱۰۰ باشد.`);
       }
     }
 
     setSaving(true);
     try {
-      const res = await fetch('/api/tests', {
-        method: 'POST',
+      const isEdit = Boolean(initialTest?.id);
+      const endpoint = isEdit ? `/api/tests/${initialTest.id}` : '/api/tests';
+      const res = await fetch(endpoint, {
+        method: isEdit ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           title: title.trim(),
@@ -861,143 +1046,173 @@ function TestCreatorForm({ user, onCreated }) {
           pass_score: Number(passScore),
           creator_id: user.id,
           creator_username: user.username,
-          questions
+          questions: questions.map((question) => ({
+            ...question,
+            type: question.type || 'single_choice',
+            text: question.text.trim(),
+            options: question.options.map((option) => option.trim()),
+            correctIndex: question.type === 'multiple_choice' ? null : Number(question.correctIndex),
+            correctIndices: question.type === 'multiple_choice' ? question.correctIndices.map(Number) : [],
+            weight: Number(question.weight),
+            explanation: question.explanation.trim()
+          }))
         })
       });
       const data = await res.json();
       if (res.ok && data.test) {
-        onCreated(data.test);
+        onCreated(data.test, isEdit);
       } else {
-        alert(data.error || 'خطا در ذخیره آزمون');
+        alert(data.error || 'ذخیره آزمون ناموفق بود.');
       }
-    } catch (err) {
-      alert('خطا در ارتباط با سرور');
+    } catch (error) {
+      alert('ارتباط با سرور برای ذخیره آزمون برقرار نشد.');
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <div className="card">
-      <h2 style={{ fontSize: '1.25rem', fontWeight: 800, marginBottom: 18 }}>
-        طراحی آزمون چهارگزینه‌ای جدید
-      </h2>
+    <div className="card test-editor">
+      <div className="section-heading">
+        <div>
+          <h2 style={{ fontSize: '1.25rem', fontWeight: 800 }}>
+            {initialTest ? 'ویرایش آزمون' : 'طراحی آزمون جدید'}
+          </h2>
+          <p className="muted-copy">پاسخ صحیح، وزن و توضیح هر سؤال را پیش از انتشار بررسی کنید.</p>
+        </div>
+        <button type="button" className="btn btn-outline btn-sm" onClick={onCancel}>بازگشت</button>
+      </div>
 
       <form onSubmit={handleSubmit}>
         <div className="grid-3">
           <div className="form-group">
             <label>نام آزمون</label>
-            <input
-              type="text"
-              placeholder="مثلاً: آزمون مبانی برنامه‌نویسی"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              required
-            />
+            <input type="text" placeholder="مثلاً: آزمون مبانی برنامه‌نویسی" value={title}
+              onChange={(event) => setTitle(event.target.value)} maxLength={120} required />
           </div>
-
           <div className="form-group">
             <label>مقیاس نمره‌دهی آزمون</label>
-            <select
-              value={maxScore}
-              onChange={(e) => {
-                const val = Number(e.target.value);
-                setMaxScore(val);
-                setPassScore(val === 20 ? 10 : 50);
-              }}
-            >
+            <select value={maxScore} onChange={(event) => {
+              const value = Number(event.target.value);
+              setMaxScore(value);
+              setPassScore(value === 20 ? 10 : 50);
+            }}>
               <option value={20}>از ۲۰ نمره</option>
               <option value={100}>از ۱۰۰ نمره</option>
             </select>
           </div>
-
           <div className="form-group">
-            <label>حداقل نمره برای قبولی (از {maxScore})</label>
-            <input
-              type="number"
-              step="0.5"
-              min="0"
-              max={maxScore}
-              value={passScore}
-              onChange={(e) => setPassScore(e.target.value)}
-              required
-            />
+            <label>حداقل نمره قبولی (از {maxScore})</label>
+            <input type="number" step="0.5" min="0" max={maxScore} value={passScore}
+              onChange={(event) => setPassScore(event.target.value)} required />
           </div>
         </div>
 
-        <hr style={{ border: 0, borderTop: '1px solid var(--border)', margin: '20px 0' }} />
+        <div className="editor-divider" />
 
-        {questions.map((q, qIdx) => (
-          <div key={qIdx} className="question-box">
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                marginBottom: 10
-              }}
-            >
-              <strong>سوال شماره {qIdx + 1}</strong>
-              {questions.length > 1 && (
-                <button
-                  type="button"
-                  className="btn btn-danger btn-sm"
-                  onClick={() => removeQuestion(qIdx)}
-                >
-                  حذف سوال
-                </button>
-              )}
+        {questions.map((question, questionIndex) => (
+          <section key={questionIndex} className="question-box editor-question">
+            <div className="question-editor-heading">
+              <strong>سؤال شماره {questionIndex + 1}</strong>
+              <div className="question-editor-tools">
+                <label className="question-type-control">
+                  <span>نوع سؤال</span>
+                  <select value={question.type || 'single_choice'} onChange={(event) => updateQuestionType(questionIndex, event.target.value)}>
+                    <option value="single_choice">تک‌پاسخی</option>
+                    <option value="multiple_choice">چندپاسخی</option>
+                    <option value="true_false">درست / نادرست</option>
+                  </select>
+                </label>
+                <label className="weight-control">
+                  <span>ضریب سؤال</span>
+                  <input type="number" min="0.1" max="100" step="0.1" value={question.weight}
+                    onChange={(event) => updateQuestion(questionIndex, { weight: event.target.value })} />
+                </label>
+                {questions.length > 1 && (
+                  <button type="button" className="btn btn-danger btn-sm" onClick={() => removeQuestion(questionIndex)}>
+                    حذف سؤال
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="form-group">
-              <input
-                type="text"
-                placeholder="صورت سوال را بنویسید..."
-                value={q.text}
-                onChange={(e) => updateQuestionText(qIdx, e.target.value)}
-                required
-              />
+              <label>متن سؤال</label>
+              <textarea rows="2" placeholder="صورت سؤال را بنویسید..." value={question.text}
+                onChange={(event) => updateQuestion(questionIndex, { text: event.target.value })} required />
             </div>
 
-            <p style={{ fontSize: '0.84rem', color: 'var(--muted)', marginBottom: 6 }}>
-              گزینه‌ها را وارد کنید و دایره کنار گزینه صحیح را انتخاب نمایید:
+            <p className="muted-copy">
+              {(question.type || 'single_choice') === 'multiple_choice'
+                ? 'تمام گزینه‌های صحیح را با تیک مشخص کنید (حداقل دو گزینه).'
+                : 'گزینه صحیح را با انتخاب دایره مشخص کنید.'}
             </p>
-
-            {q.options.map((opt, optIdx) => (
-              <div key={optIdx} className="option-row">
-                <input
-                  type="radio"
-                  name={`correct_${qIdx}`}
-                  checked={q.correctIndex === optIdx}
-                  onChange={() => updateCorrectOption(qIdx, optIdx)}
-                  title="انتخاب به عنوان گزینه صحیح"
-                />
-                <input
-                  type="text"
-                  placeholder={`گزینه ${optIdx + 1}`}
-                  value={opt}
-                  onChange={(e) => updateOption(qIdx, optIdx, e.target.value)}
-                  required
-                />
+            {question.options.map((option, optionIndex) => {
+              const isMultiple = question.type === 'multiple_choice';
+              const isCorrect = isMultiple
+                ? (question.correctIndices || []).includes(optionIndex)
+                : question.correctIndex === optionIndex;
+              return (
+              <div key={optionIndex} className={`option-row ${isCorrect ? 'correct-option-row' : ''}`}>
+                <label className="correct-radio-label" title="انتخاب به عنوان پاسخ صحیح">
+                  <input
+                    type={isMultiple ? 'checkbox' : 'radio'}
+                    name={`correct_${questionIndex}`}
+                    checked={isCorrect}
+                    onChange={() => isMultiple
+                      ? toggleCorrectIndex(questionIndex, optionIndex)
+                      : updateQuestion(questionIndex, { correctIndex: optionIndex })}
+                  />
+                  <span>{optionIndex + 1}</span>
+                </label>
+                <input type="text" placeholder={`گزینه ${optionIndex + 1}`} value={option}
+                  onChange={(event) => updateOption(questionIndex, optionIndex, event.target.value)}
+                  readOnly={question.type === 'true_false'} required />
               </div>
-            ))}
-          </div>
+              );
+            })}
+
+            <div className="form-group explanation-field">
+              <label>توضیح پاسخ صحیح <span className="optional-label">(اختیاری؛ پس از آزمون نمایش داده می‌شود)</span></label>
+              <textarea rows="2" placeholder="دلیل درست بودن پاسخ را بنویسید..." value={question.explanation}
+                onChange={(event) => updateQuestion(questionIndex, { explanation: event.target.value })} />
+            </div>
+          </section>
         ))}
 
-        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 16 }}>
+        <div className="editor-actions">
           <button type="button" className="btn btn-outline" onClick={addQuestion}>
-            <PlusCircle size={18} />
-            افزودن سوال بعدی
+            <PlusCircle size={18} /> افزودن سؤال
           </button>
-
           <button type="submit" className="btn btn-primary" disabled={saving}>
             <CheckCircle size={18} />
-            {saving ? 'در حال انتشار آزمون...' : 'ذخیره و انتشار آزمون'}
+            {saving ? 'در حال ذخیره...' : initialTest ? 'ذخیره تغییرات' : 'ذخیره و انتشار آزمون'}
           </button>
         </div>
       </form>
     </div>
   );
+}
+
+function exportAttemptsCsv(attempts) {
+  const columns = ['username', 'test_title', 'score', 'max_score', 'pass_score', 'passed', 'created_at'];
+  const labels = ['نام کاربر', 'عنوان آزمون', 'نمره', 'نمره کل', 'حد نصاب قبولی', 'وضعیت قبولی', 'زمان ثبت'];
+  const escapeCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const rows = [labels, ...attempts.map((attempt) => columns.map((column) => {
+    if (column === 'passed') return attempt.passed ? 'قبول' : 'مردود';
+    if (column === 'created_at') return new Date(attempt.created_at).toLocaleString('fa-IR');
+    return attempt[column];
+  }))];
+  const csv = `\uFEFF${rows.map((row) => row.map(escapeCell).join(',')).join('\r\n')}`;
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `test-maker-results-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function AdminAndDesignerReports({ user, tests, attempts, onInspectAttempt }) {
@@ -1021,6 +1236,21 @@ function AdminAndDesignerReports({ user, tests, attempts, onInspectAttempt }) {
   });
 
   const summaryList = Object.values(summaryMap);
+  const reportTests = user.role === 'super_admin'
+    ? tests
+    : tests.filter((test) => test.creator_id === user.id);
+  const questionAnalyses = reportTests.map((test) => {
+    const testAttempts = attempts.filter((attempt) => attempt.test_id === test.id);
+    const questions = (test.questions || []).map((question, questionIndex) => {
+      const responses = testAttempts
+        .map((attempt) => (attempt.details || []).find((detail) => detail.questionIndex === questionIndex))
+        .filter(Boolean);
+      const correct = responses.filter((response) => response.isCorrect).length;
+      const percent = responses.length ? Math.round((correct / responses.length) * 100) : null;
+      return { questionIndex, text: question.text, total: responses.length, correct, percent };
+    });
+    return { test, questions, attemptCount: testAttempts.length };
+  });
 
   return (
     <div>
@@ -1038,12 +1268,14 @@ function AdminAndDesignerReports({ user, tests, attempts, onInspectAttempt }) {
                   <th>مقیاس نمره</th>
                   <th>نمره قبولی</th>
                   <th>تعداد سوالات</th>
-                  <th>تعداد کل شرکت‌کنندگان</th>
+                  <th>شرکت‌کنندگان یکتا / دفعات شرکت</th>
+                  <th>وضعیت آزمون</th>
                 </tr>
               </thead>
               <tbody>
-                {tests.map((t) => {
+                {reportTests.map((t) => {
                   const testAttempts = attempts.filter((a) => a.test_id === t.id);
+                  const uniqueParticipants = new Set(testAttempts.map((a) => a.user_id ?? a.username)).size;
                   return (
                     <tr key={t.id}>
                       <td style={{ fontWeight: 700 }}>{t.title}</td>
@@ -1051,7 +1283,8 @@ function AdminAndDesignerReports({ user, tests, attempts, onInspectAttempt }) {
                       <td>از {t.max_score}</td>
                       <td>{t.pass_score}</td>
                       <td>{t.questions?.length || 0} سوال</td>
-                      <td>{testAttempts.length} بار</td>
+                      <td>{uniqueParticipants} نفر / {testAttempts.length} بار شرکت</td>
+                      <td>{t.is_archived ? <span className="badge-fail">آرشیو شده</span> : <span className="badge-pass">فعال</span>}</td>
                     </tr>
                   );
                 })}
@@ -1098,9 +1331,65 @@ function AdminAndDesignerReports({ user, tests, attempts, onInspectAttempt }) {
       </div>
 
       <div className="card">
-        <h3 style={{ fontSize: '1.15rem', fontWeight: 800, marginBottom: 14 }}>
-          ریز نتایج تمام آزمون‌های داده شده (با امکان مشاهده سوالات درست و اشتباه)
+        <h3 style={{ fontSize: '1.15rem', fontWeight: 800, marginBottom: 8 }}>
+          تحلیل عملکرد سؤالات
         </h3>
+        <p className="muted-copy" style={{ marginBottom: 16 }}>
+          درصد پاسخ صحیح هر سؤال بر اساس پاسخ‌برگ‌های ثبت‌شده محاسبه شده است.
+        </p>
+        {questionAnalyses.length === 0 ? (
+          <p className="muted-copy">آزمونی برای تحلیل در دسترس نیست.</p>
+        ) : (
+          <div className="question-analysis-list">
+            {questionAnalyses.map(({ test, questions, attemptCount }) => (
+              <section key={test.id} className="question-analysis-section">
+                <div className="question-analysis-title">
+                  <strong>{test.title}</strong>
+                  <span className={test.is_archived ? 'badge-fail' : 'badge-pass'}>
+                    {test.is_archived ? 'آرشیو شده' : 'فعال'} · {attemptCount} بار شرکت
+                  </span>
+                </div>
+                {attemptCount === 0 ? (
+                  <p className="muted-copy">برای این آزمون هنوز پاسخی ثبت نشده است.</p>
+                ) : (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>سؤال</th><th>پاسخ صحیح</th><th>کل پاسخ‌ها</th><th>درصد پاسخ صحیح</th></tr>
+                      </thead>
+                      <tbody>
+                        {questions.map((question) => (
+                          <tr key={question.questionIndex}>
+                            <td className="analysis-question-text">{question.questionIndex + 1}. {question.text}</td>
+                            <td>{question.correct}</td>
+                            <td>{question.total}</td>
+                            <td>
+                              <div className="analysis-rate">
+                                <strong>{question.percent ?? 0}٪</strong>
+                                <div className="progress-track"><span style={{ width: `${question.percent ?? 0}%` }} /></div>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="section-heading">
+          <h3 style={{ fontSize: '1.15rem', fontWeight: 800 }}>
+            ریز نتایج تمام آزمون‌های داده شده
+          </h3>
+          <button type="button" className="btn btn-outline btn-sm" onClick={() => exportAttemptsCsv(attempts)} disabled={!attempts.length}>
+            <Download size={16} /> خروجی CSV
+          </button>
+        </div>
         {attempts.length === 0 ? (
           <p style={{ color: 'var(--muted)' }}>هنوز نتیجه‌ای ثبت نشده است.</p>
         ) : (
