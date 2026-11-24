@@ -1,4 +1,4 @@
-const CACHE_NAME = 'test-maker-pwa-v2';
+const CACHE_NAME = 'test-maker-pwa-v3-ui';
 const APP_SHELL = [
   '/',
   '/index.html',

@@ -282,28 +282,35 @@ export default function App() {
   if (!user) {
     return (
       <div className="auth-wrapper">
-        <div className="auth-card">
-          <div style={{ textAlign: 'center', marginBottom: 24 }}>
-            <div
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 16,
-                background: '#eef2ff',
-                color: '#4f46e5',
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                marginBottom: 12
-              }}
-            >
-              <BookOpen size={30} />
+        <div className="auth-layout">
+          <aside className="auth-showcase" aria-label="معرفی سامانه آزمون‌ساز">
+            <div className="showcase-orbit orbit-one" />
+            <div className="showcase-orbit orbit-two" />
+            <div className="showcase-topline"><span className="showcase-dot" /> فضای هوشمند سنجش و یادگیری</div>
+            <div className="showcase-brand">
+              <span className="showcase-brand-mark"><BookOpen size={25} /></span>
+              <span>TEST MAKER</span>
             </div>
-            <h1 style={{ fontSize: '1.5rem', fontWeight: 800 }}>Test Maker</h1>
-            <p style={{ color: 'var(--muted)', fontSize: '0.9rem', marginTop: 4 }}>
-              سامانه آنلاین طراحی و برگزاری آزمون
-            </p>
-            <div style={{ marginTop: 12 }}><PWAInstallPrompt /></div>
+            <div className="showcase-copy">
+              <span className="showcase-kicker">THINK · TEST · GROW</span>
+              <h2>هر آزمون،<br /><em>یک قدم</em> رو به جلو.</h2>
+              <p>آزمون‌ها را بساز، دانش را بسنج و مسیر پیشرفت را با نگاهی روشن دنبال کن.</p>
+            </div>
+            <div className="showcase-feature-list">
+              <div><span className="showcase-feature-icon"><ClipboardList size={17} /></span><span><b>طراحی ساده و منعطف</b><small>از سؤال تا انتشار، همه‌چیز یک‌جا</small></span></div>
+              <div><span className="showcase-feature-icon"><BarChart2 size={17} /></span><span><b>نتایج قابل تحلیل</b><small>عملکردها را فراتر از یک نمره ببین</small></span></div>
+            </div>
+            <div className="showcase-floating-card"><span className="floating-card-check"><CheckCircle size={16} /></span><span><b>آماده‌ی شروعی؟</b><small>فضای کاربری تو آماده است</small></span><span className="floating-card-spark">✦</span></div>
+            <div className="showcase-footer">A BETTER WAY TO ASSESS</div>
+          </aside>
+
+          <div className="auth-card">
+          <div className="auth-card-heading">
+            <div className="auth-mobile-brand"><span className="brand-mark"><BookOpen size={22} /></span><span>Test Maker</span></div>
+            <span className="auth-overline">به فضای یادگیری خوش آمدی</span>
+            <h1>شروع مسیرت</h1>
+            <p>برای ادامه، وارد حساب کاربری خودت شو یا یک حساب جدید بساز.</p>
+            <div className="auth-install"><PWAInstallPrompt /></div>
           </div>
 
           {dbStatus.checked && !dbStatus.ok && (
@@ -369,6 +376,8 @@ export default function App() {
                 : 'ساخت حساب کاربری'}
             </button>
           </form>
+          <div className="auth-card-foot"><span className="auth-foot-line" /> تجربه‌ای متمرکز برای سنجش بهتر <span className="auth-foot-line" /></div>
+          </div>
         </div>
       </div>
     );
@@ -400,20 +409,21 @@ export default function App() {
       : attempts.filter((a) => designerTestIds.has(a.test_id));
 
   return (
-    <div>
+    <div className="app-shell">
       <header className="navbar">
         <div className="brand">
-          <BookOpen size={26} />
-          <span>Test Maker</span>
+          <span className="brand-mark"><BookOpen size={22} /></span>
+          <span className="brand-copy"><b>Test Maker</b><small>ASSESSMENT WORKSPACE</small></span>
         </div>
 
         <div className="user-badge">
           <PWAInstallPrompt compact />
-          <span style={{ fontWeight: 700 }}>{user.username}</span>
+          <span className="user-avatar" aria-hidden="true">{(user.username || 'U').slice(0, 1).toUpperCase()}</span>
+          <span className="user-name">{user.username}</span>
           <span className={`role-pill role-${user.role}`}>{ROLE_LABELS[user.role]}</span>
-          <button className="btn btn-outline btn-sm" onClick={handleLogout}>
+          <button className="btn btn-outline btn-sm logout-btn" onClick={handleLogout}>
             <LogOut size={16} />
-            خروج
+            <span>خروج</span>
           </button>
         </div>
       </header>
@@ -427,8 +437,9 @@ export default function App() {
         )}
 
         {takingTest ? (
-          <div className="card">
+          <div className="card exam-panel">
             <div
+              className="exam-heading"
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
@@ -512,12 +523,31 @@ export default function App() {
         ) : (
           <>
             {dataLoading && <div className="alert alert-info" role="status">در حال دریافت اطلاعات و نتایج...</div>}
+            <section className="dashboard-hero">
+              <div className="hero-content">
+                <span className="hero-eyebrow"><span className="hero-eyebrow-dot" /> پنل اختصاصی شما</span>
+                <h1>سلام {user.username}،<br /><span>آماده‌ی یک پیشرفت تازه‌ای؟</span></h1>
+                <p>{canCreateTests ? 'آزمون طراحی کن، نتایج را بررسی کن و کیفیت یادگیری را دقیق‌تر بسنج.' : 'آزمون مناسب را انتخاب کن، با تمرکز پیش برو و روند پیشرفتت را دنبال کن.'}</p>
+                <div className="hero-actions">
+                  {canCreateTests && <button className="btn hero-cta" onClick={() => { setEditingTest(null); setActiveTab('create_test'); }}><PlusCircle size={17} /> طراحی آزمون جدید</button>}
+                  <span className="hero-note"><span className="hero-note-pulse" /> فضای کاربری فعال</span>
+                </div>
+              </div>
+              <div className="hero-art" aria-hidden="true">
+                <div className="hero-art-ring ring-a" /><div className="hero-art-ring ring-b" />
+                <div className="hero-art-core"><BookOpen size={55} strokeWidth={1.35} /></div>
+                <div className="hero-art-chip chip-top"><CheckCircle size={15} /> یادگیری هدفمند</div>
+                <div className="hero-art-chip chip-bottom"><BarChart2 size={16} /> تحلیل عملکرد</div>
+                <span className="hero-art-star star-a">✦</span><span className="hero-art-star star-b">✧</span>
+              </div>
+              <div className="hero-index">01 <span>/ WORKSPACE</span></div>
+            </section>
             <div className="metrics-grid">
-              <div className="metric-card"><span>آزمون‌های فعال</span><strong>{activeTests.length}</strong></div>
-              <div className="metric-card"><span>دفعات شرکت شما</span><strong>{myAttempts.length}</strong></div>
-              <div className="metric-card"><span>میانگین درصد نمرات</span><strong>{myAverageScore}</strong></div>
-              <div className="metric-card"><span>نرخ قبولی شما</span><strong>{myPassRate}</strong></div>
-              <div className="metric-card"><span>بهترین درصد شما</span><strong>{myBestScore}</strong></div>
+              <div className="metric-card metric-violet"><span className="metric-icon"><ClipboardList size={19} /></span><span className="metric-label">آزمون‌های فعال</span><strong>{activeTests.length}</strong><small>آزمون قابل شرکت</small></div>
+              <div className="metric-card metric-blue"><span className="metric-icon"><Award size={19} /></span><span className="metric-label">دفعات شرکت شما</span><strong>{myAttempts.length}</strong><small>تلاش ثبت‌شده</small></div>
+              <div className="metric-card metric-mint"><span className="metric-icon"><BarChart2 size={19} /></span><span className="metric-label">میانگین درصد نمرات</span><strong>{myAverageScore}</strong><small>میانگین عملکرد</small></div>
+              <div className="metric-card metric-orange"><span className="metric-icon"><CheckCircle size={19} /></span><span className="metric-label">نرخ قبولی شما</span><strong>{myPassRate}</strong><small>از تمام تلاش‌ها</small></div>
+              <div className="metric-card metric-pink"><span className="metric-icon"><Award size={19} /></span><span className="metric-label">بهترین درصد شما</span><strong>{myBestScore}</strong><small>بهترین نتیجه</small></div>
             </div>
             <div className="tabs">
               <button
@@ -570,10 +600,11 @@ export default function App() {
             </div>
 
             {activeTab === 'tests' && (
-              <div>
-                <div className="test-search-wrap">
-                  <input type="search" value={testSearch} onChange={(event) => setTestSearch(event.target.value)}
-                    placeholder="جست‌وجوی آزمون بر اساس عنوان یا نام طراح..." aria-label="جست‌وجوی آزمون‌ها" />
+              <div className="tests-workspace">
+                <div className="content-heading tests-heading">
+                  <div><span className="content-eyebrow">LIBRARY / ASSESSMENTS</span><h2>آزمون‌های در دسترس</h2><p>یک آزمون انتخاب کن و دانسته‌هایت را به چالش بکش.</p></div>
+                  <div className="test-search-wrap"><input type="search" value={testSearch} onChange={(event) => setTestSearch(event.target.value)}
+                    placeholder="جست‌وجوی آزمون یا طراح..." aria-label="جست‌وجوی آزمون‌ها" /></div>
                 </div>
                 {activeTests.length === 0 ? (
                   <div className="card" style={{ textAlign: 'center', color: 'var(--muted)' }}>
@@ -586,8 +617,8 @@ export default function App() {
                     {visibleTests.map((t) => {
                       const myCount = myAttempts.filter((a) => a.test_id === t.id).length;
                       return (
-                        <div key={t.id} className="card" style={{ marginBottom: 0 }}>
-                          <div
+                        <article key={t.id} className="card test-card">
+                          <div className="test-card-head"
                             style={{
                               display: 'flex',
                               justifyContent: 'space-between',
@@ -595,7 +626,7 @@ export default function App() {
                               marginBottom: 12
                             }}
                           >
-                            <h3 style={{ fontSize: '1.15rem', fontWeight: 800 }}>{t.title}</h3>
+                            <div className="test-card-title-wrap"><span className="test-card-symbol"><ClipboardList size={20} /></span><div><span className="test-card-kicker">ASSESSMENT</span><h3>{t.title}</h3></div></div>
                             {(user.role === 'super_admin' || t.creator_id === user.id) && (
                               <div className="test-card-actions">
                                 {attempts.every((attempt) => attempt.test_id !== t.id) && (
@@ -611,16 +642,7 @@ export default function App() {
                             )}
                           </div>
 
-                          <div
-                            style={{
-                              fontSize: '0.88rem',
-                              color: 'var(--muted)',
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 4,
-                              marginBottom: 16
-                            }}
-                          >
+                          <div className="test-meta">
                             <span>
                               طراح آزمون: <strong>{t.creator_username}</strong>
                             </span>
@@ -637,12 +659,12 @@ export default function App() {
                           </div>
 
                           <button
-                            className="btn btn-primary btn-block"
+                            className="btn btn-primary btn-block test-start-btn"
                             onClick={() => startTest(t)}
                           >
-                            شروع آزمون
+                            شروع آزمون <span aria-hidden="true">←</span>
                           </button>
-                        </div>
+                        </article>
                       );
                     })}
                   </div>
@@ -934,6 +956,7 @@ export default function App() {
           </div>
         )}
       </main>
+      <footer className="app-footer"><span>TEST MAKER</span><span>سنجش دقیق‌تر، مسیر روشن‌تر.</span><span>© {new Date().getFullYear()}</span></footer>
     </div>
   );
 }
